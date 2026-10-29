@@ -287,6 +287,26 @@ static const char *builtin_src(const char *name, int *stage) {
                "layout(location = 0) out vec4 o;\n"
                "void main() { o = vec4(texture(t, uv).rgb, 1.0); }\n";
     }
+    if (!strcmp(name, "present_hdr.frag")) {  // (LARECOMP_HDR: SDR sRGB -> linear -> PQ(ST2084); white nits from
+        *stage = STAGE_FRAGMENT;                   //  LARECOMP_HDR_SDR_NITS, default 203)
+        static char src[2048];
+        float nits = getenv("LARECOMP_HDR_SDR_NITS") ? (float)atof(getenv("LARECOMP_HDR_SDR_NITS")) : 203.0f;
+        snprintf(src, sizeof src, "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t;\n"
+               "layout(location = 0) in vec2 uv;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "vec3 srgb_to_linear(vec3 c) { return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c)); }\n"
+               "vec3 linear_to_pq(vec3 v) {\n"
+               "  const float m1 = 2610.0 / 16384.0, m2 = 2523.0 / 32.0, c1 = 3424.0 / 4096.0, c2 = 2413.0 / 128.0, c3 = 2392.0 / 128.0;\n"
+               "  vec3 p = pow(max(v, vec3(0.0)), vec3(m1));\n"
+               "  return pow((c1 + c2 * p) / (1.0 + c3 * p), vec3(m2));\n"
+               "}\n"
+               "void main() {\n"
+               "  vec3 lin = srgb_to_linear(texture(t, uv).rgb);\n"
+               "  o = vec4(linear_to_pq(lin * (%.6f / 10000.0)), 1.0);\n"
+               "}\n", (double)nits);
+        return src;
+    }
     if (!strcmp(name, "present_a.frag")) {  // (debug pass dumps: alpha kept)
         *stage = STAGE_FRAGMENT;
         return "#version 450\n"

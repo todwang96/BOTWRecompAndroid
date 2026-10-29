@@ -6769,9 +6769,9 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
 static VkPipelineLayout present_layout;
 static VkDescriptorSetLayout present_set_layout;
 
-static VkPipeline present_pipeline_a(VkFormat fmt, bool alpha) {  // alpha: the texture's own (debug pass dumps)
-    static struct { VkFormat f; bool a; VkPipeline p; } cache[6];
-    for (int i = 0; i < 6; i++) if (cache[i].p && cache[i].f == fmt && cache[i].a == alpha) return cache[i].p;
+static VkPipeline present_pipeline_a(VkFormat fmt, bool alpha, bool hdr) {  // alpha: the texture's own (debug pass dumps)
+    static struct { VkFormat f; bool a, h; VkPipeline p; } cache[8];
+    for (int i = 0; i < 8; i++) if (cache[i].p && cache[i].f == fmt && cache[i].a == alpha && cache[i].h == hdr) return cache[i].p;
     if (!present_layout) {
         VkDescriptorSetLayoutBinding b = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
         VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &b};
@@ -6785,7 +6785,7 @@ static VkPipeline present_pipeline_a(VkFormat fmt, bool alpha) {  // alpha: the 
         {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT,
          .module = vk_builtin_shader("present.vert"), .pName = "main"},
         {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-         .module = vk_builtin_shader(alpha ? "present_a.frag" : "present.frag"), .pName = "main"}};
+         .module = vk_builtin_shader(alpha ? "present_a.frag" : hdr ? "present_hdr.frag" : "present.frag"), .pName = "main"}};
     VkPipelineVertexInputStateCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
                                                  .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
@@ -6812,10 +6812,10 @@ static VkPipeline present_pipeline_a(VkFormat fmt, bool alpha) {  // alpha: the 
     }
     VkPipeline p;
     VK_CHECK(vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &p));
-    for (int i = 0; i < 6; i++) if (!cache[i].p) { cache[i].f = fmt; cache[i].a = alpha; cache[i].p = p; break; }
+    for (int i = 0; i < 8; i++) if (!cache[i].p) { cache[i].f = fmt; cache[i].a = alpha; cache[i].h = hdr; cache[i].p = p; break; }
     return p;
 }
-static VkPipeline present_pipeline(VkFormat fmt) { return present_pipeline_a(fmt, false); }
+static VkPipeline present_pipeline(VkFormat fmt) { return present_pipeline_a(fmt, false, false); }
 
 // Scanout shows the bytes the game wrote: sRGB images are read through a UNORM view (no decode), like metal.m.
 uint32_t vk_dump_depth_layer = ~0u;
@@ -7132,7 +7132,7 @@ static void scene_upscale(Prog *pr, CmdRec *r) {
 void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, float vw, float vh, const float pv[8]) {
     if (!b || !b->image || (b->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT)) return;
     VkImageView src = post_process(cb, b, pv[6] > 0 ? vw / pv[6] : vw, pv[7] > 0 ? vh / pv[7] : vh);
-    VkPipeline p = present_pipeline(g_vk.sc_format);
+    VkPipeline p = present_pipeline_a(g_vk.sc_format, false, g_vk.hdr);
     VkDescriptorSet ds = vk_alloc_set(present_set_layout);
     VkDescriptorImageInfo ii = {vk_default_sampler(true), src, VK_IMAGE_LAYOUT_GENERAL};
     VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 0, .descriptorCount = 1,
@@ -7209,7 +7209,7 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
                           .colorAttachmentCount = 1, .pColorAttachments = &ca};
     const VkFormat rgba8 = VK_FORMAT_R8G8B8A8_UNORM;
     vk_begin_rendering(cb, &ri, &rgba8, VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_1_BIT);
-    VkPipeline p = present_pipeline_a(VK_FORMAT_R8G8B8A8_UNORM, strstr(path, "pass_") != NULL);
+    VkPipeline p = present_pipeline_a(VK_FORMAT_R8G8B8A8_UNORM, strstr(path, "pass_") != NULL, false);
     VkDescriptorSet ds = vk_alloc_set(present_set_layout);
     VkDescriptorImageInfo ii = {vk_default_sampler(true), raw_view(b), VK_IMAGE_LAYOUT_GENERAL};
     VkWriteDescriptorSet wr = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 0, .descriptorCount = 1,

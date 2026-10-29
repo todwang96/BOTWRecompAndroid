@@ -54,6 +54,12 @@ static void create_instance(void) {
     for (Uint32 i = 0; i < n_sdl && n_ext < 14; i++) ext[n_ext++] = sdl_ext[i];
     bool validate = getenv("LARECOMP_VK_VALIDATION") != NULL;
     if (validate) ext[n_ext++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+    bool hdr_want = getenv("LARECOMP_HDR") && *getenv("LARECOMP_HDR") && strcmp(getenv("LARECOMP_HDR"), "0");
+    unsigned hdr_ne = 0;
+    if (hdr_want && n_ext + 1 <= 16) {  // (VK_EXT_hdr_metadata is a device extension: below)
+        ext[n_ext++] = VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME;
+        hdr_ne = 1;
+    }
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
     VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "LARecomp",
                              .pEngineName = "LARecomp", .apiVersion = VK_API_VERSION_1_3};
@@ -66,6 +72,12 @@ static void create_instance(void) {
         ci.enabledLayerCount = 0;
         ci.enabledExtensionCount--;
         validate = false;
+        r = vkCreateInstance(&ci, NULL, &g_vk.inst);
+    }
+    if (r != VK_SUCCESS && hdr_ne) {  // (driver without the HDR instance extensions: continue SDR)
+        LOG("[vk] HDR instance extensions unavailable (%d); HDR output off\n", r);
+        ci.enabledExtensionCount -= hdr_ne;
+        hdr_ne = 0;
         r = vkCreateInstance(&ci, NULL, &g_vk.inst);
     }
     if (r != VK_SUCCESS) FATAL("vkCreateInstance: %d (is a Vulkan 1.3 driver installed?)\n", r);
@@ -175,7 +187,8 @@ static bool compat_group(VkExtensionProperties *ep, uint32_t ne, uint32_t api, i
 }
 
 static bool env_on(const char *name) { const char *v = getenv(name); return v && atoi(v); }
-bool vk_driver_is_turnip(void);  // (defined below: the gpu-heap automatic looks at the driver before that)
+static bool have_getenv_hdr(void) { const char *v = getenv("LARECOMP_HDR"); return v && *v && strcmp(v, "0"); }
+bool vk_driver_is_turnip(void);  // (defined below; the gpu-heap automatic needs it earlier)
 
 // ---- synchronization2 without it (Mali's older drivers): Vulkan 1.0's barriers, submissions and timestamps. The
 // stage / access bits below 32 are 1.0's own; the split-up ones above map to the 1.0 bit they came from. (From LAS
@@ -529,6 +542,8 @@ static void create_device(void) {
     }
 #endif
     if (g_vk.host_import) ext[n_ext++] = VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME;
+    bool hdr_meta = have_getenv_hdr() && has_ext(ep, ne, VK_EXT_HDR_METADATA_EXTENSION_NAME);
+    if (hdr_meta) ext[n_ext++] = VK_EXT_HDR_METADATA_EXTENSION_NAME;
     bool fault = has_ext(ep, ne, VK_EXT_DEVICE_FAULT_EXTENSION_NAME);  // device-lost diagnostics (vk_device_fault_report)
 #ifdef __ANDROID__
     if (fault && !fault_have.deviceFault) {
@@ -938,8 +953,22 @@ static void create_swapchain(void) {
 #ifdef __ANDROID__
     if (nf == 1 && sf.format == VK_FORMAT_UNDEFINED) sf.format = VK_FORMAT_B8G8R8A8_UNORM;
 #endif
-    for (uint32_t i = 0; i < nf; i++)
-        if (fmts[i].format == VK_FORMAT_B8G8R8A8_UNORM && fmts[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) { sf = fmts[i]; break; }
+    bool hdr_want2 = getenv("LARECOMP_HDR") && *getenv("LARECOMP_HDR") && strcmp(getenv("LARECOMP_HDR"), "0");
+    if (getenv("LARECOMP_LOG_SURFACE"))
+        for (uint32_t i = 0; i < nf; i++)
+            LOG("[vk] surface format %u: format %d colorspace %d\n", i, (int)fmts[i].format, (int)fmts[i].colorSpace);
+    bool hdr_ok = false;
+    if (hdr_want2) {  // 10-bit HDR10 (ST2084/PQ): the game's colours are SDR; present_hdr.frag encodes them for HDR
+        for (uint32_t i = 0; i < nf; i++)
+            if ((fmts[i].format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 ||
+                 fmts[i].format == VK_FORMAT_R10X6G10X6B10X6A10X6_UNORM_4PACK16) &&
+                fmts[i].colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT) { sf = fmts[i]; hdr_ok = true; break; }
+        if (!hdr_ok) LOG("[vk] HDR10: no 10-bit + ST2084 surface format among %u; falling back to SDR\n", nf);
+    }
+    g_vk.hdr = hdr_ok;
+    if (!hdr_ok)
+        for (uint32_t i = 0; i < nf; i++)
+            if (fmts[i].format == VK_FORMAT_B8G8R8A8_UNORM && fmts[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) { sf = fmts[i]; break; }
     uint32_t count = caps.minImageCount + 1;
     if (caps.maxImageCount && count > caps.maxImageCount) count = caps.maxImageCount;
     if (count > 8) count = 8;  // (asked for: the driver may make more, up to VK_MAX_SWAP_IMAGES)
@@ -968,6 +997,22 @@ static void create_swapchain(void) {
         .compositeAlpha = alpha, .presentMode = present_mode(), .clipped = VK_TRUE,
         .oldSwapchain = old};
     VK_CHECK(vkCreateSwapchainKHR(g_vk.dev, &ci, NULL, &g_vk.swapchain));
+    if (hdr_ok) {  // metadata: SDR content lifted into the HDR10 container (203 nits white)
+        g_vk.set_hdr_metadata = (PFN_vkSetHdrMetadataEXT)vkGetDeviceProcAddr(g_vk.dev, "vkSetHdrMetadataEXT");
+        if (g_vk.set_hdr_metadata) {
+            float nits = getenv("LARECOMP_HDR_NITS") ? (float)atof(getenv("LARECOMP_HDR_NITS")) : 420.0f;
+            VkHdrMetadataEXT m = {.sType = VK_STRUCTURE_TYPE_HDR_METADATA_EXT,
+                                  .displayPrimaryRed = {0.708f, 0.292f}, .displayPrimaryGreen = {0.170f, 0.797f},
+                                  .displayPrimaryBlue = {0.131f, 0.046f}, .whitePoint = {0.3127f, 0.3290f},
+                                  .maxLuminance = nits, .minLuminance = 0.05f,
+                                  .maxContentLightLevel = 203.0f, .maxFrameAverageLightLevel = 203.0f};
+            g_vk.set_hdr_metadata(g_vk.dev, 1, &g_vk.swapchain, &m);
+            LOG("[vk] HDR10 output: format %d, colorspace ST2084, maxLuminance %.0f nits, swapchain %ux%u\n",
+                (int)ci.imageFormat, nits, ext.width, ext.height);
+        } else {
+            LOG("[vk] HDR10: vkSetHdrMetadataEXT missing; output without metadata\n");
+        }
+    }
     for (uint32_t i = 0; i < g_vk.sc_count; i++) vk_rp_forget_view(g_vk.sc_views[i]), vkDestroyImageView(g_vk.dev, g_vk.sc_views[i], NULL);
     if (old) vkDestroySwapchainKHR(g_vk.dev, old, NULL);
     g_vk.sc_format = sf.format;
@@ -1686,14 +1731,13 @@ bool vk_adreno_8xx(const char *name) {
 bool vk_turnip_path_on(int setting) {
     if (setting >= 0) return setting != 0;
     if (vk_adreno_8xx(g_vk.props.deviceName)) return true;
-    // Turnip names an Adreno 732 "Adreno (TM) 735", and vk_adreno_8xx takes that for a pre-8xx GPU: the heap stayed
-    // off, and the game's text glyphs (a buffer ~2.7 GB into the 3 GB heap, outside any storage descriptor's reach)
-    // read as zeros - every menu, dialogue and item name blank. A Turnip that can place the heap in GPU memory is
-    // meant to be on for those paths: without it the game is unreadable on such a GPU.
+    // this fork: Turnip (its deviceName may be e.g. "Adreno (TM) 735") and drivers with the placed map path:
+    // without the GPU heap the game's text glyphs sit outside storage descriptors and every menu is blank
     return g_vk.map_placed && vk_driver_is_turnip();
 }
 static bool g_lrz_at_start = true;
 bool vk_lrz_at_start(void) { return g_lrz_at_start; }  // (the start screen: a change needs a restart)
+bool vk_hdr_at_start(void) { return g_vk.hdr; }        // (this fork: same, the swapchain format is fixed at start)
 const char *vk_gpu_name(void) { return g_vk.props.deviceName; }
 #endif
 

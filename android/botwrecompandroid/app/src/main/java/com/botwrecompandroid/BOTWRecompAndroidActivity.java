@@ -94,6 +94,26 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
         return new String[] {"SDL3", "shaderc_shared", "main"};
     }
 
+    // this fork: HDR output from the env, or the ini (Settings > Driver compatibility > HDR output)
+    private boolean hdrWanted() {
+        String e = System.getenv("LARECOMP_HDR");
+        if (e != null) return !"0".equals(e);
+        java.io.File root = getExternalFilesDir(null);
+        if (root == null) return false;
+        for (String rel : new String[]{"v190/botwrecompandroid.ini", "botwrecompandroid.ini"}) {
+            try (java.io.FileInputStream in = new java.io.FileInputStream(new java.io.File(root, rel))) {
+                String txt = new String(readAll(in), java.nio.charset.StandardCharsets.UTF_8);
+                for (String line : txt.split("\\r?\\n")) {
+                    int eq = line.indexOf('=');
+                    if (eq < 0 || !"hdr".equals(line.substring(0, eq).trim())) continue;
+                    String v = line.substring(eq + 1).trim();
+                    return !"0".equals(v) && !"off".equals(v);
+                }
+            } catch (java.io.IOException ignore) { }
+        }
+        return false;
+    }
+
     @Override
     protected void onCreate(Bundle state) {
         try {
@@ -138,6 +158,14 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
             }
         } catch (IOException | ErrnoException e) {
             Log.e(TAG, "setup: " + e);
+        }
+        if (android.os.Build.VERSION.SDK_INT >= 26 && hdrWanted()) {
+            try {
+                getWindow().setColorMode(android.content.pm.ActivityInfo.COLOR_MODE_HDR);
+                Log.i(TAG, "HDR: window color mode set");
+            } catch (Throwable t) {
+                Log.w(TAG, "HDR: window color mode: " + t);
+            }
         }
         self = this;
         setShowWhenLocked(true);

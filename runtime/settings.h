@@ -49,7 +49,8 @@ typedef struct {
     // where a Turnip path draws wrong: read when the game starts (gpu_heap, inplace_reads) or when the app starts
     // (turnip_lrz, log_file). -1 Automatic: on for the Adreno 8xx GPUs these paths were made on, off elsewhere
     // (vulkan/device.c vk_adreno_8xx); 1 on, 0 off.
-    int gpu_heap;         // Turnip: the game's memory mapped as GPU memory (vulkan/exec.c vk_heap_place); off: CPU copies
+    int gpu_heap;         //
+    int hdr;              // (this fork, LARECOMP_HDR) HDR10 output: -1 auto (attempt; SDR when unsupported), 1 on, 0 off Turnip: the game's memory mapped as GPU memory (vulkan/exec.c vk_heap_place); off: CPU copies
     int inplace_reads;    // Turnip: draws sample targets they write as they are (vulkan/exec.c resolve_feedback); off: copies
     int turnip_lrz;       // Turnip's low-resolution Z; off: TU_DEBUG=nolrz before the driver loads (vulkan/device.c)
     bool log_file;        // the log in a file as well (platform/android.c), to send with a report

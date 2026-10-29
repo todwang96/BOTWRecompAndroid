@@ -530,6 +530,7 @@ static void android_call_int(const char *method, int v) {  // (one int argument)
 extern "C" void android_log_file(bool on);
 extern "C" bool vk_adreno_8xx(const char *name);  // (Driver compatibility's Automatic: runtime/nvn/vulkan/device.c)
 extern "C" bool vk_lrz_at_start(void);
+extern "C" bool vk_hdr_at_start(void);  // (this fork: HDR output, a restart to change it)
 extern "C" const char *vk_gpu_name(void);
 extern "C" const char *vk_driver_rejected(void);  // (runtime/nvn/vulkan/android_driver.c)
 extern "C" const char *vk_driver_desc(void);      // (its own name and version: runtime/nvn/vulkan/device.c)
@@ -1501,6 +1502,19 @@ static void prelaunch_tab(float sc) {
         ImGui::TextDisabled("%s", tr("Turnip's early depth test, a little faster. Off can fix missing or broken drawing on "
                                   "some Adreno GPUs. Automatic: on for Adreno 8xx GPUs, off for the others. Applies when "
                                   "BOTWRecompAndroid restarts."));
+        ImGui::Spacing();
+        ImGui::Text("%s", tr("HDR output (10-bit, HDR10)"));
+        changed |= tri("hdr", &g_settings.hdr);
+        ImGui::TextDisabled("%s", tr("On: the final image is written as 10-bit HDR10 (ST2084/PQ) when the display takes it "
+                                  "(SDR colours mapped to 203-nit white). Off: the SDR output and screenshots as before. "
+                                  "Automatic: on when the display reports HDR support. Applies from the next app start."));
+        if ((g_settings.hdr != 0) != vk_hdr_at_start()) {
+            ImGui::Text("%s", tr("Restart BOTWRecompAndroid to apply it."));
+            ImGui::SameLine();
+            ImGui::PushID("hdr");
+            if (ImGui::Button(tr("Restart now"))) { settings_save(); android_call("restartApp"); }
+            ImGui::PopID();
+        }
         bool lrz_now = g_settings.turnip_lrz < 0 ? a8 : g_settings.turnip_lrz != 0;
         if (lrz_now != vk_lrz_at_start()) {  // (Turnip reads it once, when the app starts)
             ImGui::Text("%s", tr("Restart BOTWRecompAndroid to apply it."));

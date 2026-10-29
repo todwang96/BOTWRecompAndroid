@@ -45,6 +45,7 @@ Settings g_settings = {
     .touch_opacity = 1.0f,
     .touch_drag_sens = 1.0f,
     .gpu_heap = -1,
+    .hdr = 0,  // (this fork: HDR10 output off unless the ini/UI asks; a display that can't take it falls back)
     .inplace_reads = -1,
     .turnip_lrz = -1,
     .event_fps_unlock = false,  // (some events count frames: hle/framepace.c in_event)
@@ -249,6 +250,7 @@ void settings_load(void) {
         else if (!strcmp(key, "native_code")) g_settings.native_code = atoi(val) != 0;
         else if (!strcmp(key, "files_in_place")) g_settings.files_in_place = atoi(val) != 0;
         else if (!strcmp(key, "gpu_heap")) g_settings.gpu_heap = !strcmp(val, "auto") ? -1 : atoi(val) != 0;
+        else if (!strcmp(key, "hdr")) g_settings.hdr = !strcmp(val, "auto") ? -1 : atoi(val) != 0;
         else if (!strcmp(key, "inplace_reads")) g_settings.inplace_reads = !strcmp(val, "auto") ? -1 : atoi(val) != 0;
         else if (!strcmp(key, "turnip_lrz")) g_settings.turnip_lrz = !strcmp(val, "auto") ? -1 : atoi(val) != 0;
         else if (!strcmp(key, "log_file")) g_settings.log_file = atoi(val) != 0;
@@ -306,6 +308,11 @@ void settings_load(void) {
     if (!aspect_key) g_settings.aspect_asked = true;  // (likewise: the aspect ratio was chosen already)
     if (g_settings.volume < 0) g_settings.volume = 0;
     if (g_settings.volume > 2) g_settings.volume = 2;
+#ifdef __ANDROID__
+    // this fork: the ini/UI choice reaches the Vulkan backend (device.c), which reads it with getenv; an explicit
+    // env (adb am start --es env, or files/env.txt) wins.
+    if (!getenv("LARECOMP_HDR")) setenv("LARECOMP_HDR", g_settings.hdr == 0 ? "0" : "1", 1);
+#endif
     LOG("[settings] loaded %s\n", SETTINGS_FILE);
 }
 
@@ -332,8 +339,9 @@ void settings_save(void) {
             g_settings.sync_lag, g_settings.native_code, g_settings.files_in_place);
     static const char *const tri[] = {"auto", "0", "1"};  // (-1 / 0 / 1)
 #define TRI(v) tri[(v) < 0 ? 0 : (v) ? 2 : 1]
-    fprintf(f, "gpu_heap = %s\ninplace_reads = %s\nturnip_lrz = %s\nlog_file = %d\ngpu_model = %s\n", TRI(g_settings.gpu_heap),
-            TRI(g_settings.inplace_reads), TRI(g_settings.turnip_lrz), g_settings.log_file, g_settings.gpu_model);
+    fprintf(f, "gpu_heap = %s\ninplace_reads = %s\nturnip_lrz = %s\nhdr = %s\nlog_file = %d\ngpu_model = %s\n",
+            TRI(g_settings.gpu_heap), TRI(g_settings.inplace_reads), TRI(g_settings.turnip_lrz), TRI(g_settings.hdr),
+            g_settings.log_file, g_settings.gpu_model);
 #undef TRI
     fprintf(f, "touch_drag_camera = %d\ntouch_drag_sens = %.2f\ntouch_sticks_hidden = %d\ntouch_half_areas = %d\n",
             g_settings.touch_drag_camera, g_settings.touch_drag_sens, g_settings.touch_sticks_hidden,

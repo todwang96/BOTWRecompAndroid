@@ -60,6 +60,8 @@ typedef struct {
     uint32_t api;                 // the device's Vulkan version as used: 1.3, or 1.1 / 1.2 with extensions (device.c)
 #endif
     // window
+    bool hdr;                       // (LARECOMP_HDR) 10-bit HDR10 swapchain + PQ output
+    PFN_vkSetHdrMetadataEXT set_hdr_metadata;
     VkSurfaceKHR surface;
     VkSwapchainKHR swapchain;
     VkFormat sc_format;
