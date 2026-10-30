@@ -352,8 +352,89 @@ void plat_thread_realtime(uint64_t period_ns) {
     setpriority(PRIO_PROCESS, (id_t)gettid(), -8);  // (THREAD_PRIORITY_DISPLAY; fails quietly if not allowed)
 }
 
+// ---- CPU affinity (this fork): LARECOMP_CPU_BIG=1 keeps every thread the runtime starts (the presenting thread, the
+// render thread, the game's job workers, audio) on the cores that are not the little cluster. BOTW's guest threads
+// expect the Switch's three equal cores; Android otherwise puts a busy worker on a little core (a 1.9 GHz A520 next
+// to a 2.8 GHz prime), where it takes up to twice as long, and the frame's critical path (the presenting thread) waits
+// for it. One mask for every thread keeps the threads' relative speeds as they were, so the game's job-system timing
+// (which counts yields and waits) stays as it is - unlike LARECOMP_PIN, which put the presenting thread alone on the
+// fastest cores and crashed the game's job system (see above). Off with LARECOMP_CPU_BIG=0 (or where there is no
+// slower cluster to avoid); LARECOMP_CPU_BIG_PCT=1..99 (default 70) sets how close to the fastest core's top clock a
+// core must be to stay in the mask.
+static cpu_set_t g_affinity_all;
+static cpu_set_t g_big_cores;
+static bool g_big_on;
+
+static long core_top_clock(int c) {
+    char path[96];
+    snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", c);
+    FILE *f = fopen(path, "re");
+    if (f) {
+        long khz = 0;
+        if (fscanf(f, "%ld", &khz) == 1 && khz > 0) { fclose(f); return khz / 1000; }
+        fclose(f);
+    }
+    snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpu_capacity", c);  // (a relative number, same order)
+    f = fopen(path, "re");
+    if (f) {
+        long cap = 0;
+        if (fscanf(f, "%ld", &cap) == 1 && cap > 0) { fclose(f); return cap; }
+        fclose(f);
+    }
+    return 0;
+}
+
+static void cpu_big_init(void) {
+    static int want = -1;
+    if (want < 0) {
+        const char *e = getenv("LARECOMP_CPU_BIG");
+        want = e ? atoi(e) != 0 : 1;
+    }
+    if (!want) return;
+    if (sched_getaffinity(0, sizeof g_affinity_all, &g_affinity_all)) return;
+    long clock[CPU_SETSIZE] = {0}, best = 0;
+    int n = 0;
+    for (int c = 0; c < CPU_SETSIZE && c < 64; c++) {
+        if (!CPU_ISSET(c, &g_affinity_all)) continue;
+        n = c + 1;
+        clock[c] = core_top_clock(c);
+        if (clock[c] > best) best = clock[c];
+    }
+    if (!best) { LOG("[android] CPU affinity: no core clocks to sort by, left alone\n"); return; }
+    int pct = 70;
+    const char *pe = getenv("LARECOMP_CPU_BIG_PCT");
+    if (pe && atoi(pe) >= 1 && atoi(pe) <= 99) pct = atoi(pe);
+    long threshold = best * pct / 100;
+    CPU_ZERO(&g_big_cores);
+    int k = 0, slow = 0;
+    long slowest = 0;
+    for (int c = 0; c < n; c++) {
+        if (!CPU_ISSET(c, &g_affinity_all)) continue;
+        if (clock[c] >= threshold) { CPU_SET(c, &g_big_cores); k++; }
+        else {
+            slow++;
+            if (!slowest || clock[c] < slowest) slowest = clock[c];
+        }
+    }
+    if (k < 2 || slow == 0) {
+        LOG("[android] CPU affinity: %d core%s of one speed (fastest %ld), nothing to avoid; left alone\n", k, k == 1 ? "" : "s", best);
+        return;
+    }
+    g_big_on = true;
+    if (sched_setaffinity(0, sizeof g_big_cores, &g_big_cores)) {
+        g_big_on = false;
+        LOG("[android] CPU affinity: %d cores >= %ld of %ld, the %d slower avoided: %s\n", k, threshold, best, slow, strerror(errno));
+        return;
+    }
+    LOG("[android] CPU affinity: %d of %d cores >= %ld of %ld (slowest %ld avoided), every runtime thread: on (mask %llx, LARECOMP_CPU_BIG=0: off)\n",
+        k, n, threshold, best, slowest, (unsigned long long)g_big_cores.__bits[0]);
+}
+
 // ---- process
-void plat_init(void) { log_to_logcat(); }
+void plat_init(void) {
+    log_to_logcat();
+    cpu_big_init();
+}
 
 // "The executable": a file in the folder the app copies its shipped resources to (internal storage, files/res: the
 // Baloo font, the icon, ...), so runtime/paths.c finds them next to it as on the desktop. Native libraries stay in
@@ -700,6 +781,8 @@ static void uclamp_min_thread(void) {
 
 void plat_thread_unpin(void) {
     if (g_pinned) sched_setaffinity(0, sizeof g_all_cores, &g_all_cores);
+    else if (g_big_on && sched_setaffinity(0, sizeof g_big_cores, &g_big_cores))  // (a core gone offline: every core)
+        sched_setaffinity(0, sizeof g_affinity_all, &g_affinity_all);
     uclamp_min_thread();
 }
 
